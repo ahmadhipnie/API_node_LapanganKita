@@ -53,7 +53,7 @@ class UserController {
   // POST /api/users - Membuat user baru
   static async createUser(req, res) {
     try {
-      const { name, email, password, gender, address, date_of_birth, account_number, bank_type } = req.body;
+      const { name, email, password, gender, address, date_of_birth, account_number, bank_type, role } = req.body;
       
       // Validasi field wajib
       if (!name || !email || !password || !gender || !address || !date_of_birth || !account_number || !bank_type) {

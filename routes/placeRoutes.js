@@ -1,13 +1,14 @@
 const express = require('express');
 const PlaceController = require('../controllers/PlaceController');
+const { formDataFields } = require('../middleware/formData');
 
 const router = express.Router();
 
 // Routes untuk places
 router.get('/', PlaceController.getAllPlaces);
 router.get('/:id', PlaceController.getPlaceById);
-router.post('/', PlaceController.createPlace);
-router.put('/:id', PlaceController.updatePlace);
+router.post('/', formDataFields, PlaceController.createPlace);
+router.put('/:id', formDataFields, PlaceController.updatePlace);
 router.delete('/:id', PlaceController.deletePlace);
 
 // Routes tambahan
