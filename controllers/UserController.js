@@ -1,4 +1,6 @@
 const UserModel = require('../models/UserModel');
+const EmailVerifiedModel = require('../models/EmailVerifiedModel');
+const EmailService = require('../services/EmailService');
 
 class UserController {
   // GET /api/users - Mendapatkan semua users
@@ -75,10 +77,23 @@ class UserController {
       const userId = await UserModel.create(req.body);
       const newUser = await UserModel.getById(userId);
 
+      // Generate dan kirim OTP untuk verifikasi email
+      const otp = EmailVerifiedModel.generateOTP();
+      await EmailVerifiedModel.create({
+        email: email,
+        id_user: userId,
+        otp: otp
+      });
+
+      // Kirim email OTP
+      const emailResult = await EmailService.sendOTPEmail(email, otp, name);
+      
       res.status(201).json({
         success: true,
-        message: 'User berhasil dibuat',
-        data: newUser
+        message: 'User berhasil dibuat. Silakan cek email untuk verifikasi OTP.',
+        data: newUser,
+        emailSent: emailResult.success,
+        note: 'Email verification diperlukan untuk aktivasi akun'
       });
     } catch (error) {
       console.error('Error creating user:', error);
@@ -305,6 +320,155 @@ class UserController {
       res.status(500).json({
         success: false,
         message: 'Gagal mengubah password',
+        error: error.message
+      });
+    }
+  }
+
+  // POST /api/users/verify-otp - Verifikasi OTP email
+  static async verifyOTP(req, res) {
+    try {
+      const { email, otp } = req.body;
+      
+      if (!email || !otp) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email dan OTP wajib diisi'
+        });
+      }
+
+      // Verifikasi OTP
+      const otpRecord = await EmailVerifiedModel.verifyOTP(email, otp);
+      
+      if (!otpRecord) {
+        return res.status(400).json({
+          success: false,
+          message: 'OTP tidak valid atau sudah expired. OTP berlaku 15 menit.'
+        });
+      }
+
+      // Update status verifikasi user
+      const verified = await UserModel.verifyEmail(otpRecord.id_user);
+      
+      if (!verified) {
+        return res.status(500).json({
+          success: false,
+          message: 'Gagal memverifikasi user'
+        });
+      }
+
+      // Hapus OTP record setelah berhasil diverifikasi
+      await EmailVerifiedModel.delete(otpRecord.id);
+
+      // Ambil data user yang sudah diverifikasi
+      const verifiedUser = await UserModel.getById(otpRecord.id_user);
+
+      // Kirim email welcome
+      await EmailService.sendWelcomeEmail(email, verifiedUser.name);
+
+      res.json({
+        success: true,
+        message: 'Email berhasil diverifikasi! Akun Anda sudah aktif.',
+        data: verifiedUser
+      });
+    } catch (error) {
+      console.error('Error verifying OTP:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Gagal memverifikasi OTP',
+        error: error.message
+      });
+    }
+  }
+
+  // POST /api/users/resend-otp - Kirim ulang OTP
+  static async resendOTP(req, res) {
+    try {
+      const { email } = req.body;
+      
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email wajib diisi'
+        });
+      }
+
+      // Cek apakah user dengan email tersebut ada
+      const user = await UserModel.getByEmail(email);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'Email tidak terdaftar'
+        });
+      }
+
+      // Cek apakah user sudah diverifikasi
+      if (user.is_verified) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email sudah diverifikasi sebelumnya'
+        });
+      }
+
+      // Hapus OTP lama jika ada
+      await EmailVerifiedModel.deleteByEmail(email);
+
+      // Generate OTP baru
+      const otp = EmailVerifiedModel.generateOTP();
+      await EmailVerifiedModel.create({
+        email: email,
+        id_user: user.id,
+        otp: otp
+      });
+
+      // Kirim email OTP baru
+      const emailResult = await EmailService.sendOTPEmail(email, otp, user.name);
+
+      res.json({
+        success: true,
+        message: 'OTP baru berhasil dikirim ke email Anda',
+        emailSent: emailResult.success
+      });
+    } catch (error) {
+      console.error('Error resending OTP:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Gagal mengirim ulang OTP',
+        error: error.message
+      });
+    }
+  }
+
+  // GET /api/users/check-verification/:email - Cek status verifikasi email
+  static async checkVerificationStatus(req, res) {
+    try {
+      const { email } = req.params;
+      
+      const user = await UserModel.getByEmail(email);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'Email tidak terdaftar'
+        });
+      }
+
+      // Cek apakah ada OTP aktif
+      const hasActiveOTP = await EmailVerifiedModel.hasActiveOTP(email);
+
+      res.json({
+        success: true,
+        data: {
+          email: email,
+          isVerified: !!user.is_verified,
+          hasActiveOTP: hasActiveOTP,
+          verifiedAt: user.is_verified
+        }
+      });
+    } catch (error) {
+      console.error('Error checking verification status:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Gagal mengecek status verifikasi',
         error: error.message
       });
     }

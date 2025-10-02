@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const { testConnection } = require('./config/database');
 require('dotenv').config();
 
@@ -9,6 +10,7 @@ const placeRoutes = require('./routes/placeRoutes');
 const fieldRoutes = require('./routes/fieldRoutes');
 const bookingRoutes = require('./routes/bookingRoutes');
 const addOnRoutes = require('./routes/addOnRoutes');
+const uploadRoutes = require('./routes/uploadRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,6 +19,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Serve static files untuk uploads
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Middleware untuk logging request
 app.use((req, res, next) => {
@@ -102,6 +107,7 @@ app.use('/api/places', placeRoutes);
 app.use('/api/fields', fieldRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/add-ons', addOnRoutes);
+app.use('/uploads', uploadRoutes); // Routes untuk serve photos
 
 // Health check endpoint
 app.get('/health', async (req, res) => {

@@ -17,4 +17,9 @@ router.post('/login', formDataFields, UserController.loginUser);
 router.patch('/:id/verify-email', UserController.verifyUser);
 router.patch('/:id/change-password', formDataFields, UserController.changePassword);
 
+// Routes untuk OTP verification
+router.post('/verify-otp', formDataFields, UserController.verifyOTP);
+router.post('/resend-otp', formDataFields, UserController.resendOTP);
+router.get('/check-verification/:email', UserController.checkVerificationStatus);
+
 module.exports = router;

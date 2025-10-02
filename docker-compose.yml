@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: lapangan-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword123
+      MYSQL_DATABASE: lapangan_kita
+      MYSQL_USER: lapangan_user
+      MYSQL_PASSWORD: lapangan_pass123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    networks:
+      - lapangan-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Node.js API
+  api:
+    build: .
+    container_name: lapangan-api
+    restart: unless-stopped
+    environment:
+      # Database Configuration
+      DB_HOST: mysql
+      DB_USER: lapangan_user
+      DB_PASSWORD: lapangan_pass123
+      DB_NAME: lapangan_kita
+      DB_PORT: 3306
+      
+      # App Configuration
+      PORT: 3000
+      NODE_ENV: production
+      
+      # Email Configuration (opsional - sesuaikan dengan email Anda)
+      EMAIL_USER: your-email@gmail.com
+      EMAIL_PASSWORD: your-app-password
+    ports:
+      - "3000:3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+    networks:
+      - lapangan-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # phpMyAdmin untuk manage database (opsional)
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: lapangan-phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: lapangan_user
+      PMA_PASSWORD: lapangan_pass123
+    ports:
+      - "8080:80"
+    depends_on:
+      - mysql
+    networks:
+      - lapangan-network
+
+volumes:
+  mysql_data:
+  uploads_data:
+
+networks:
+  lapangan-network:
+    driver: bridge
