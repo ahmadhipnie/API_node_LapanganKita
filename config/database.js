@@ -3,10 +3,10 @@ require('dotenv').config();
 
 // Konfigurasi database
 const dbConfig = {
-  host: process.env.DB_HOST || 'bw6-f7.h.filess.io',
-  user: process.env.DB_USER || 'lapanganKita_largesthad',
-  password: process.env.DB_PASSWORD || '34a1b28ebbe91fade14af46a132e16e1ec453474',
-  database: process.env.DB_NAME || 'lapanganKita_largesthad',
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'lapangan_kita_db',
   port: process.env.DB_PORT || 3306,
   waitForConnections: true,
   connectionLimit: 10,

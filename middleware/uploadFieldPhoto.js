@@ -2,49 +2,51 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Setup direktori upload untuk places
-const uploadDir = path.join(__dirname, '../uploads/places');
+// Pastikan folder upload exists
+const uploadDir = path.join(__dirname, '..', 'uploads', 'fields');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Storage configuration untuk menyimpan file di uploads/places
+// Konfigurasi storage
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination: (req, file, cb) => {
     cb(null, uploadDir);
   },
-  filename: function (req, file, cb) {
-    // Format: place-timestamp-random.ext
+  filename: (req, file, cb) => {
+    // Format: field-{timestamp}-{random}.{ext}
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const extension = path.extname(file.originalname);
-    cb(null, 'place-' + uniqueSuffix + extension);
+    const ext = path.extname(file.originalname);
+    cb(null, `field-${uniqueSuffix}${ext}`);
   }
 });
 
-// File filter untuk gambar saja
+// File filter untuk validasi tipe file
 const fileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith('image/')) {
+  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+  
+  if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('File harus berupa gambar!'), false);
+    cb(new Error('Tipe file tidak diizinkan. Hanya JPEG, PNG, dan WEBP yang diperbolehkan.'), false);
   }
 };
 
-// Multer setup dengan limit yang wajar
+// Konfigurasi multer
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB maksimal
+    fileSize: 5 * 1024 * 1024 // 5MB limit
   },
   fileFilter: fileFilter
 });
 
 // Middleware untuk single file upload
-const uploadPlacePhoto = upload.single('place_photo');
+const uploadFieldPhoto = upload.single('field_photo');
 
 // Wrapper untuk error handling
-const handleUploadPlacePhoto = (req, res, next) => {
-  uploadPlacePhoto(req, res, (err) => {
+const handleUploadFieldPhoto = (req, res, next) => {
+  uploadFieldPhoto(req, res, (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({
@@ -66,13 +68,13 @@ const handleUploadPlacePhoto = (req, res, next) => {
     // Jika ada file yang diupload, simpan info file path
     if (req.file) {
       // Path relatif untuk disimpan di database
-      req.body.place_photo = `/uploads/places/${req.file.filename}`;
-      req.body.place_photo_filename = req.file.filename;
-      req.body.place_photo_path = req.file.path;
+      req.body.field_photo = `/uploads/fields/${req.file.filename}`;
+      req.body.field_photo_filename = req.file.filename;
+      req.body.field_photo_path = req.file.path;
       
-      console.log(`✅ File uploaded: ${req.file.filename}`);
+      console.log(`✅ Field photo uploaded: ${req.file.filename}`);
       console.log(`📁 Saved to: ${req.file.path}`);
-      console.log(`🔗 Database path: ${req.body.place_photo}`);
+      console.log(`🔗 Database path: ${req.body.field_photo}`);
     }
     
     next();
@@ -84,11 +86,13 @@ const deleteFile = (filePath) => {
   try {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
-      console.log(`🗑️ File deleted: ${filePath}`);
+      console.log(`🗑️ Field photo deleted: ${filePath}`);
       return true;
+    } else {
+      console.log(`⚠️ Field photo not found: ${filePath}`);
     }
   } catch (error) {
-    console.error('Error deleting file:', error.message);
+    console.error('Error deleting field photo:', error.message);
     return false;
   }
   return false;
@@ -113,7 +117,7 @@ const getFullPath = (dbPath) => {
 };
 
 module.exports = {
-  handleUploadPlacePhoto,
+  handleUploadFieldPhoto,
   deleteFile,
   getFullPath,
   uploadDir

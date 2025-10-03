@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "message": "Booking berhasil dibuat",
+  "data": {
+    "booking_id": 5,
+    "order_id": "BOOKING-1704518400000-10",
+    "total_price": 350000,
+    "status": "waiting_confirmation",
+    "message": "Booking menunggu konfirmasi dari pemilik lapangan"
+  }
+}

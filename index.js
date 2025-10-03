@@ -2,15 +2,15 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { testConnection } = require('./config/database');
+const BookingScheduler = require('./services/BookingScheduler');
 require('dotenv').config();
 
 // Import routes
 const userRoutes = require('./routes/userRoutes');
 const placeRoutes = require('./routes/placeRoutes');
-const fieldRoutes = require('./routes/fieldRoutes');
+const fieldRoutes = require('./routes/fields');
 const bookingRoutes = require('./routes/bookingRoutes');
 const addOnRoutes = require('./routes/addOnRoutes');
-const uploadRoutes = require('./routes/uploadRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -65,37 +65,32 @@ app.get('/', (req, res) => {
         'DELETE /api/places/:id': 'Hapus place'
       },
       fields: {
-        'GET /api/fields': 'Mendapatkan semua fields',
+        'GET /api/fields': 'Mendapatkan semua fields dengan info place dan owner',
         'GET /api/fields/:id': 'Mendapatkan field berdasarkan ID',
-        'GET /api/fields/place/:placeId': 'Mendapatkan fields berdasarkan place ID',
-        'GET /api/fields/available/:placeId': 'Mendapatkan fields yang tersedia berdasarkan place ID',
-        'POST /api/fields': 'Membuat field baru',
-        'PUT /api/fields/:id': 'Update field',
-        'DELETE /api/fields/:id': 'Hapus field'
+        'GET /api/fields/place/:id_place': 'Mendapatkan fields berdasarkan place ID',
+        'GET /api/fields/search?q=': 'Mencari fields berdasarkan nama, deskripsi, atau tipe',
+        'POST /api/fields': 'Membuat field baru (multipart/form-data, owner validation)',
+        'PUT /api/fields/:id': 'Update field (multipart/form-data, owner validation)',
+        'DELETE /api/fields/:id': 'Hapus field (owner validation, hapus foto otomatis)'
       },
       bookings: {
-        'GET /api/bookings': 'Mendapatkan semua bookings',
+        'GET /api/bookings': 'Mendapatkan semua bookings (admin only)',
         'GET /api/bookings/:id': 'Mendapatkan booking berdasarkan ID',
-        'GET /api/bookings/user/:userId': 'Mendapatkan bookings berdasarkan user ID',
-        'GET /api/bookings/field/:fieldId': 'Mendapatkan bookings berdasarkan field ID',
-        'GET /api/bookings/status/:status': 'Mendapatkan bookings berdasarkan status',
-        'GET /api/bookings/order/:orderId': 'Mendapatkan booking berdasarkan order ID',
-        'POST /api/bookings': 'Membuat booking baru',
-        'POST /api/bookings/check-availability': 'Cek ketersediaan field',
-        'PUT /api/bookings/:id': 'Update booking',
-        'PATCH /api/bookings/:id/status': 'Update status booking',
-        'PATCH /api/bookings/:id/snap-token': 'Update snap token booking',
-        'DELETE /api/bookings/:id': 'Hapus booking'
+        'GET /api/bookings/me/bookings': 'Mendapatkan booking user saat ini',
+        'GET /api/bookings/owner/bookings': 'Mendapatkan booking field owner (field_owner only)',
+        'POST /api/bookings': 'Membuat booking baru dengan add-ons (user only)',
+        'PATCH /api/bookings/:id/status': 'Update status booking approve/cancel (field_owner only)',
+        'PATCH /api/bookings/:id/complete': 'Selesaikan booking setelah payment'
       },
       addOns: {
-        'GET /api/add-ons': 'Mendapatkan semua add-ons',
+        'GET /api/add-ons': 'Mendapatkan semua add-ons dengan info place dan owner',
         'GET /api/add-ons/:id': 'Mendapatkan add-on berdasarkan ID',
         'GET /api/add-ons/place/:placeId': 'Mendapatkan add-ons berdasarkan place ID',
-        'GET /api/add-ons/available/:placeId': 'Mendapatkan add-ons yang tersedia berdasarkan place ID',
-        'POST /api/add-ons': 'Membuat add-on baru',
-        'PUT /api/add-ons/:id': 'Update add-on',
-        'PATCH /api/add-ons/:id/stock': 'Update stock add-on',
-        'DELETE /api/add-ons/:id': 'Hapus add-on'
+        'GET /api/add-ons/available/:placeId': 'Mendapatkan add-ons yang tersedia (stock > 0) berdasarkan place ID',
+        'POST /api/add-ons': 'Membuat add-on baru (multipart/form-data, owner validation, foto wajib)',
+        'PUT /api/add-ons/:id': 'Update add-on (multipart/form-data, owner validation)',
+        'PATCH /api/add-ons/:id/stock': 'Update stock add-on (owner validation)',
+        'DELETE /api/add-ons/:id': 'Hapus add-on (owner validation, hapus foto otomatis)'
       }
     }
   });
@@ -107,7 +102,6 @@ app.use('/api/places', placeRoutes);
 app.use('/api/fields', fieldRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/add-ons', addOnRoutes);
-app.use('/uploads', uploadRoutes); // Routes untuk serve photos
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
@@ -156,6 +150,9 @@ const startServer = async () => {
     
     if (!dbConnected) {
       console.log('⚠️  Warning: Database connection failed, but server will still start');
+    } else {
+      // Start the booking auto-complete scheduler only if DB is connected
+      BookingScheduler.startScheduler();
     }
 
     app.listen(PORT, () => {
@@ -176,11 +173,13 @@ const startServer = async () => {
 // Handle graceful shutdown
 process.on('SIGTERM', () => {
   console.log('🛑 SIGTERM received, shutting down gracefully');
+  BookingScheduler.stopScheduler();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   console.log('🛑 SIGINT received, shutting down gracefully');
+  BookingScheduler.stopScheduler();
   process.exit(0);
 });
 

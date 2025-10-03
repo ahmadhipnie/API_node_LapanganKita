@@ -1,19 +1,36 @@
-const FieldModel = require('../models/FieldModel');
+const mysql = require('mysql2/promise');
+const { deleteFile, getFullPath } = require('../middleware/uploadFieldPhoto');
 
 class FieldController {
-  // GET /api/fields - Mendapatkan semua fields
+  // Get all fields with place and owner info
   static async getAllFields(req, res) {
     try {
-      const fields = await FieldModel.getAll();
-      
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [fields] = await connection.execute(`
+        SELECT f.*, p.place_name, p.address as place_address, u.name as place_owner_name 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        LEFT JOIN users u ON p.id_users = u.id 
+        ORDER BY f.created_at DESC
+      `);
+
+      await connection.end();
+
       res.json({
         success: true,
         message: 'Data fields berhasil diambil',
-        data: fields,
-        total: fields.length
+        data: fields
       });
+
     } catch (error) {
-      console.error('Error getting all fields:', error);
+      console.error('Error getting fields:', error);
       res.status(500).json({
         success: false,
         message: 'Gagal mengambil data fields',
@@ -22,13 +39,30 @@ class FieldController {
     }
   }
 
-  // GET /api/fields/:id - Mendapatkan field berdasarkan ID
+  // Get field by ID
   static async getFieldById(req, res) {
     try {
       const { id } = req.params;
-      const field = await FieldModel.getById(id);
       
-      if (!field) {
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [fields] = await connection.execute(`
+        SELECT f.*, p.place_name, p.address as place_address, u.name as place_owner_name 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE f.id = ?
+      `, [id]);
+
+      await connection.end();
+
+      if (fields.length === 0) {
         return res.status(404).json({
           success: false,
           message: 'Field tidak ditemukan'
@@ -38,8 +72,9 @@ class FieldController {
       res.json({
         success: true,
         message: 'Data field berhasil diambil',
-        data: field
+        data: fields[0]
       });
+
     } catch (error) {
       console.error('Error getting field by ID:', error);
       res.status(500).json({
@@ -50,29 +85,99 @@ class FieldController {
     }
   }
 
-  // POST /api/fields - Membuat field baru
+  // Create new field with owner validation
   static async createField(req, res) {
     try {
-      const { field_name, opening_time, closing_time, price_per_hour, description, field_type, max_person, id_place } = req.body;
+      const {
+        field_name,
+        opening_time,
+        closing_time,
+        price_per_hour,
+        description,
+        field_type,
+        status = 'available',
+        max_person,
+        id_place,
+        id_users
+      } = req.body;
       
-      // Validasi field wajib
-      if (!field_name || !opening_time || !closing_time || !price_per_hour || !field_type || !max_person || !id_place) {
+      // Validation
+      if (!field_name || !opening_time || !closing_time || !price_per_hour || !description || !field_type || !max_person || !id_place || !id_users) {
         return res.status(400).json({
           success: false,
-          message: 'Field field_name, opening_time, closing_time, price_per_hour, field_type, max_person, dan id_place wajib diisi'
+          message: 'Semua field wajib diisi: field_name, opening_time, closing_time, price_per_hour, description, field_type, max_person, id_place, id_users'
         });
       }
 
-      const fieldId = await FieldModel.create(req.body);
-      const newField = await FieldModel.getById(fieldId);
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Validate place ownership
+      const [places] = await connection.execute(
+        'SELECT id, id_users FROM places WHERE id = ? AND id_users = ?',
+        [id_place, id_users]
+      );
+
+      if (places.length === 0) {
+        await connection.end();
+        return res.status(400).json({
+          success: false,
+          message: 'Place tidak ditemukan atau Anda bukan pemilik place tersebut'
+        });
+      }
+
+      const photoPath = req.file ? `/uploads/fields/${req.file.filename}` : '';
+      
+      const [result] = await connection.execute(`
+        INSERT INTO fields (
+          field_name, opening_time, closing_time, price_per_hour, 
+          description, field_type, field_photo, status, max_person, 
+          id_place, created_at, updated_at
+        ) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+      `, [
+        field_name,
+        opening_time,
+        closing_time,
+        price_per_hour,
+        description,
+        field_type,
+        photoPath,
+        status,
+        max_person,
+        id_place
+      ]);
+
+      // Get the newly created field with related data
+      const [newField] = await connection.execute(`
+        SELECT f.*, p.place_name, p.address as place_address, u.name as place_owner_name 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE f.id = ?
+      `, [result.insertId]);
+
+      await connection.end();
 
       res.status(201).json({
         success: true,
         message: 'Field berhasil dibuat',
-        data: newField
+        data: newField[0]
       });
+
     } catch (error) {
       console.error('Error creating field:', error);
+      
+      // Clean up uploaded file if error
+      if (req.file) {
+        deleteFile(req.file.path);
+      }
+      
       res.status(500).json({
         success: false,
         message: 'Gagal membuat field',
@@ -81,38 +186,134 @@ class FieldController {
     }
   }
 
-  // PUT /api/fields/:id - Update field
+  // Update field with owner validation
   static async updateField(req, res) {
     try {
       const { id } = req.params;
-      
-      // Cek apakah field ada
-      const existingField = await FieldModel.getById(id);
-      if (!existingField) {
+      const { id_users } = req.body;
+
+      if (!id_users) {
+        return res.status(400).json({
+          success: false,
+          message: 'id_users (place owner) wajib disertakan untuk validasi'
+        });
+      }
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Get existing field and validate owner
+      const [existingField] = await connection.execute(`
+        SELECT f.*, p.id_users as place_owner_id 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        WHERE f.id = ?
+      `, [id]);
+
+      if (existingField.length === 0) {
+        await connection.end();
         return res.status(404).json({
           success: false,
           message: 'Field tidak ditemukan'
         });
       }
 
-      const updated = await FieldModel.update(id, req.body);
-      
-      if (!updated) {
-        return res.status(500).json({
+      if (existingField[0].place_owner_id != id_users) {
+        await connection.end();
+        return res.status(403).json({
           success: false,
-          message: 'Gagal mengupdate field'
+          message: 'Anda tidak memiliki izin untuk mengubah field ini'
         });
       }
 
-      const updatedField = await FieldModel.getById(id);
+      // Delete old photo if new photo uploaded
+      if (req.file && existingField[0].field_photo) {
+        const oldFilePath = getFullPath(existingField[0].field_photo);
+        if (oldFilePath) {
+          deleteFile(oldFilePath);
+        }
+      }
+
+      // Build dynamic update query
+      const updateFields = [];
+      const updateValues = [];
+      const { field_name, opening_time, closing_time, price_per_hour, description, field_type, status, max_person } = req.body;
+
+      if (field_name) {
+        updateFields.push('field_name = ?');
+        updateValues.push(field_name);
+      }
+      if (opening_time) {
+        updateFields.push('opening_time = ?');
+        updateValues.push(opening_time);
+      }
+      if (closing_time) {
+        updateFields.push('closing_time = ?');
+        updateValues.push(closing_time);
+      }
+      if (price_per_hour !== undefined) {
+        updateFields.push('price_per_hour = ?');
+        updateValues.push(price_per_hour);
+      }
+      if (description) {
+        updateFields.push('description = ?');
+        updateValues.push(description);
+      }
+      if (field_type) {
+        updateFields.push('field_type = ?');
+        updateValues.push(field_type);
+      }
+      if (status) {
+        updateFields.push('status = ?');
+        updateValues.push(status);
+      }
+      if (max_person !== undefined) {
+        updateFields.push('max_person = ?');
+        updateValues.push(max_person);
+      }
+      if (req.file) {
+        updateFields.push('field_photo = ?');
+        updateValues.push(`/uploads/fields/${req.file.filename}`);
+      }
+
+      updateFields.push('updated_at = NOW()');
+      updateValues.push(id);
+
+      if (updateFields.length > 1) {
+        const updateQuery = `UPDATE fields SET ${updateFields.join(', ')} WHERE id = ?`;
+        await connection.execute(updateQuery, updateValues);
+      }
+
+      // Get updated field data
+      const [updatedField] = await connection.execute(`
+        SELECT f.*, p.place_name, p.address as place_address, u.name as place_owner_name 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE f.id = ?
+      `, [id]);
+
+      await connection.end();
 
       res.json({
         success: true,
         message: 'Field berhasil diupdate',
-        data: updatedField
+        data: updatedField[0]
       });
+
     } catch (error) {
       console.error('Error updating field:', error);
+      
+      // Clean up uploaded file if error
+      if (req.file) {
+        deleteFile(req.file.path);
+      }
+      
       res.status(500).json({
         success: false,
         message: 'Gagal mengupdate field',
@@ -121,33 +322,68 @@ class FieldController {
     }
   }
 
-  // DELETE /api/fields/:id - Hapus field
+  // Delete field with owner validation
   static async deleteField(req, res) {
     try {
       const { id } = req.params;
-      
-      // Cek apakah field ada
-      const existingField = await FieldModel.getById(id);
-      if (!existingField) {
+      const { id_users } = req.body;
+
+      if (!id_users) {
+        return res.status(400).json({
+          success: false,
+          message: 'id_users (place owner) wajib disertakan untuk validasi'
+        });
+      }
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Get field and validate owner
+      const [field] = await connection.execute(`
+        SELECT f.*, p.id_users as place_owner_id 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        WHERE f.id = ?
+      `, [id]);
+
+      if (field.length === 0) {
+        await connection.end();
         return res.status(404).json({
           success: false,
           message: 'Field tidak ditemukan'
         });
       }
 
-      const deleted = await FieldModel.delete(id);
-      
-      if (!deleted) {
-        return res.status(500).json({
+      if (field[0].place_owner_id != id_users) {
+        await connection.end();
+        return res.status(403).json({
           success: false,
-          message: 'Gagal menghapus field'
+          message: 'Anda tidak memiliki izin untuk menghapus field ini'
         });
+      }
+
+      // Delete from database
+      await connection.execute('DELETE FROM fields WHERE id = ?', [id]);
+      await connection.end();
+
+      // Delete photo file
+      if (field[0].field_photo) {
+        const filePath = getFullPath(field[0].field_photo);
+        if (filePath) {
+          deleteFile(filePath);
+        }
       }
 
       res.json({
         success: true,
         message: 'Field berhasil dihapus'
       });
+
     } catch (error) {
       console.error('Error deleting field:', error);
       res.status(500).json({
@@ -158,42 +394,38 @@ class FieldController {
     }
   }
 
-  // GET /api/fields/search/:fieldType - Cari field berdasarkan jenis field
-  static async searchByFieldType(req, res) {
+  // Get fields by place
+  static async getFieldsByPlace(req, res) {
     try {
-      const { fieldType } = req.params;
-      const fields = await FieldModel.getByFieldType(fieldType);
-      
-      res.json({
-        success: true,
-        message: `Data field ${fieldType} berhasil diambil`,
-        data: fields,
-        total: fields.length
-      });
-    } catch (error) {
-      console.error('Error searching fields:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mencari fields',
-        error: error.message
-      });
-    }
-  }
+      const { id_place } = req.params;
 
-  // GET /api/fields/place/:placeId - Mendapatkan fields berdasarkan place ID
-  static async getFieldsByPlaceId(req, res) {
-    try {
-      const { placeId } = req.params;
-      const fields = await FieldModel.getByPlaceId(placeId);
-      
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [fields] = await connection.execute(`
+        SELECT f.*, p.place_name, p.address as place_address, u.name as place_owner_name 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE f.id_place = ? 
+        ORDER BY f.created_at DESC
+      `, [id_place]);
+
+      await connection.end();
+
       res.json({
         success: true,
         message: 'Data fields berhasil diambil',
-        data: fields,
-        total: fields.length
+        data: fields
       });
+
     } catch (error) {
-      console.error('Error getting fields by place ID:', error);
+      console.error('Error getting fields by place:', error);
       res.status(500).json({
         success: false,
         message: 'Gagal mengambil data fields',
@@ -202,96 +434,49 @@ class FieldController {
     }
   }
 
-  // PATCH /api/fields/:id/status - Update status field
-  static async updateFieldStatus(req, res) {
-    try {
-      const { id } = req.params;
-      const { status } = req.body;
-      
-      // Validasi status
-      const validStatuses = ['available', 'not available'];
-      if (!status || !validStatuses.includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Status harus salah satu dari: available, not available'
-        });
-      }
-
-      // Cek apakah field ada
-      const existingField = await FieldModel.getById(id);
-      if (!existingField) {
-        return res.status(404).json({
-          success: false,
-          message: 'Field tidak ditemukan'
-        });
-      }
-
-      const updated = await FieldModel.updateStatus(id, status);
-      
-      if (!updated) {
-        return res.status(500).json({
-          success: false,
-          message: 'Gagal mengupdate status field'
-        });
-      }
-
-      const updatedField = await FieldModel.getById(id);
-
-      res.json({
-        success: true,
-        message: 'Status field berhasil diupdate',
-        data: updatedField
-      });
-    } catch (error) {
-      console.error('Error updating field status:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengupdate status field',
-        error: error.message
-      });
-    }
-  }
-
-  // POST /api/fields/search - Pencarian fields dengan filter
+  // Search fields
   static async searchFields(req, res) {
     try {
-      const filters = req.body;
-      const fields = await FieldModel.searchFields(filters);
+      const { q } = req.query;
       
-      res.json({
-        success: true,
-        message: 'Data fields berhasil diambil',
-        data: fields,
-        total: fields.length,
-        filters: filters
-      });
-    } catch (error) {
-      console.error('Error searching fields with filters:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mencari fields',
-        error: error.message
-      });
-    }
-  }
+      if (!q) {
+        return res.status(400).json({
+          success: false,
+          message: 'Parameter pencarian (q) diperlukan'
+        });
+      }
 
-  // GET /api/fields/available/:placeId - Mendapatkan fields yang tersedia berdasarkan place ID
-  static async getAvailableFieldsByPlaceId(req, res) {
-    try {
-      const { placeId } = req.params;
-      const fields = await FieldModel.getAvailableByPlaceId(placeId);
-      
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [fields] = await connection.execute(`
+        SELECT f.*, p.place_name, p.address as place_address, u.name as place_owner_name 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE f.field_name LIKE ? OR f.description LIKE ? OR f.field_type LIKE ?
+        ORDER BY f.created_at DESC
+      `, [`%${q}%`, `%${q}%`, `%${q}%`]);
+
+      await connection.end();
+
       res.json({
         success: true,
-        message: 'Data fields yang tersedia berhasil diambil',
+        message: 'Pencarian berhasil',
         data: fields,
-        total: fields.length
+        query: q
       });
+
     } catch (error) {
-      console.error('Error getting available fields by place ID:', error);
+      console.error('Error searching fields:', error);
       res.status(500).json({
         success: false,
-        message: 'Gagal mengambil data fields yang tersedia',
+        message: 'Gagal melakukan pencarian',
         error: error.message
       });
     }

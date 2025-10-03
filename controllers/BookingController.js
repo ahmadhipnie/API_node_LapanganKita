@@ -1,17 +1,62 @@
-const BookingModel = require('../models/BookingModel');
+﻿const mysql = require('mysql2/promise');
 
 class BookingController {
-  // GET /api/bookings - Mendapatkan semua booking
+  // Get all bookings with detail bookings - NO AUTH REQUIRED
   static async getAllBooking(req, res) {
     try {
-      const bookings = await BookingModel.getAll();
-      
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Auto update expired bookings to completed
+      await BookingController.autoUpdateExpiredBookings(connection);
+
+      const [bookings] = await connection.execute(`
+        SELECT 
+          b.*,
+          u.name as user_name,
+          u.email as user_email,
+          f.field_name,
+          f.field_type,
+          p.place_name,
+          p.address as place_address,
+          fo.name as field_owner_name
+        FROM bookings b
+        LEFT JOIN users u ON b.id_users = u.id
+        LEFT JOIN fields f ON b.field_id = f.id
+        LEFT JOIN places p ON f.id_place = p.id
+        LEFT JOIN users fo ON p.id_users = fo.id
+        ORDER BY b.created_at DESC
+      `);
+
+      // Get detail bookings for each booking
+      for (let i = 0; i < bookings.length; i++) {
+        const [details] = await connection.execute(`
+          SELECT 
+            db.*,
+            a.add_on_name,
+            a.add_on_description,
+            a.price_per_hour
+          FROM detail_booking db
+          LEFT JOIN add_ons a ON db.id_add_on = a.id
+          WHERE db.id_booking = ?
+        `, [bookings[i].id]);
+        
+        bookings[i].detail_bookings = details;
+      }
+
+      await connection.end();
+
       res.json({
         success: true,
         message: 'Data bookings berhasil diambil',
-        data: bookings,
-        total: bookings.length
+        data: bookings
       });
+
     } catch (error) {
       console.error('Error getting all bookings:', error);
       res.status(500).json({
@@ -22,24 +67,71 @@ class BookingController {
     }
   }
 
-  // GET /api/bookings/:id - Mendapatkan booking berdasarkan ID
+  // Get booking by ID with detail bookings - NO AUTH REQUIRED
   static async getBookingById(req, res) {
     try {
       const { id } = req.params;
-      const booking = await BookingModel.getById(id);
       
-      if (!booking) {
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Auto update expired bookings to completed
+      await BookingController.autoUpdateExpiredBookings(connection);
+
+      const [bookings] = await connection.execute(`
+        SELECT 
+          b.*,
+          u.name as user_name,
+          u.email as user_email,
+          f.field_name,
+          f.field_type,
+          f.price_per_hour as field_price_per_hour,
+          p.place_name,
+          p.address as place_address,
+          fo.name as field_owner_name
+        FROM bookings b
+        LEFT JOIN users u ON b.id_users = u.id
+        LEFT JOIN fields f ON b.field_id = f.id
+        LEFT JOIN places p ON f.id_place = p.id
+        LEFT JOIN users fo ON p.id_users = fo.id
+        WHERE b.id = ?
+      `, [id]);
+
+      if (bookings.length === 0) {
+        await connection.end();
         return res.status(404).json({
           success: false,
           message: 'Booking tidak ditemukan'
         });
       }
 
+      // Get detail bookings
+      const [details] = await connection.execute(`
+        SELECT 
+          db.*,
+          a.add_on_name,
+          a.add_on_description,
+          a.price_per_hour
+        FROM detail_booking db
+        LEFT JOIN add_ons a ON db.id_add_on = a.id
+        WHERE db.id_booking = ?
+      `, [id]);
+
+      bookings[0].detail_bookings = details;
+
+      await connection.end();
+
       res.json({
         success: true,
         message: 'Data booking berhasil diambil',
-        data: booking
+        data: bookings[0]
       });
+
     } catch (error) {
       console.error('Error getting booking by ID:', error);
       res.status(500).json({
@@ -50,43 +142,210 @@ class BookingController {
     }
   }
 
-  // POST /api/bookings - Membuat booking baru
+  // Create new booking with add-ons - NO AUTH REQUIRED
   static async createBooking(req, res) {
     try {
       const { 
-        booking_datetime_start, booking_datetime_end, order_id,
-        total_price, field_id, id_users 
+        id_users,
+        field_id, 
+        booking_datetime_start, 
+        booking_datetime_end,
+        snap_token,
+        note = null,
+        add_ons = [] // Array of {id_add_on, quantity}
       } = req.body;
-      
-      // Validasi field wajib
-      if (!booking_datetime_start || !booking_datetime_end || !order_id || 
-          !total_price || !field_id || !id_users) {
+
+      // Validate required fields
+      if (!id_users || !field_id || !booking_datetime_start || !booking_datetime_end || !snap_token) {
         return res.status(400).json({
           success: false,
-          message: 'Field booking_datetime_start, booking_datetime_end, order_id, total_price, field_id, dan id_users wajib diisi'
+          message: 'Field yang diperlukan: id_users, field_id, booking_datetime_start, booking_datetime_end, snap_token'
         });
       }
 
-      // Cek ketersediaan field
-      const isAvailable = await BookingModel.checkAvailability(
-        field_id, booking_datetime_start, booking_datetime_end
-      );
-
-      if (!isAvailable) {
-        return res.status(409).json({
+      // Validate booking time restrictions
+      const now = new Date();
+      const startDate = new Date(booking_datetime_start);
+      const endDate = new Date(booking_datetime_end);
+      
+      // Check if booking is for past date
+      if (startDate < now) {
+        return res.status(400).json({
           success: false,
-          message: 'Field tidak tersedia pada waktu yang dipilih'
+          message: 'Tidak dapat booking untuk tanggal yang sudah terlewat'
+        });
+      }
+      
+      // Check minimum 1 day before booking
+      const oneDayFromNow = new Date(now.getTime() + (24 * 60 * 60 * 1000));
+      if (startDate < oneDayFromNow) {
+        return res.status(400).json({
+          success: false,
+          message: 'Booking harus dilakukan minimal 1 hari sebelum waktu mulai'
+        });
+      }
+      
+      // Validate end time is after start time
+      if (endDate <= startDate) {
+        return res.status(400).json({
+          success: false,
+          message: 'booking_datetime_end harus lebih besar dari booking_datetime_start'
         });
       }
 
-      const bookingId = await BookingModel.create(req.body);
-      const newBooking = await BookingModel.getById(bookingId);
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Check if field exists and get field info
+      const [fields] = await connection.execute(`
+        SELECT f.*, p.id_users as owner_id 
+        FROM fields f 
+        LEFT JOIN places p ON f.id_place = p.id 
+        WHERE f.id = ?
+      `, [field_id]);
+
+      if (fields.length === 0) {
+        await connection.end();
+        return res.status(404).json({
+          success: false,
+          message: 'Lapangan tidak ditemukan'
+        });
+      }
+
+      const field = fields[0];
+
+      // Check for conflicting bookings
+      const [conflicts] = await connection.execute(`
+        SELECT id FROM bookings 
+        WHERE field_id = ? 
+        AND status IN ('waiting_confirmation', 'approved') 
+        AND (
+          (booking_datetime_start <= ? AND booking_datetime_end > ?) OR
+          (booking_datetime_start < ? AND booking_datetime_end >= ?) OR
+          (booking_datetime_start >= ? AND booking_datetime_start < ?)
+        )
+      `, [field_id, booking_datetime_start, booking_datetime_start, booking_datetime_end, booking_datetime_end, booking_datetime_start, booking_datetime_end]);
+
+      if (conflicts.length > 0) {
+        await connection.end();
+        return res.status(400).json({
+          success: false,
+          message: 'Waktu booking bentrok dengan booking lain'
+        });
+      }
+
+      // Calculate hours from datetime difference
+      const hoursDiff = Math.ceil((endDate - startDate) / (1000 * 60 * 60));
+
+      // Validate and check stock for add-ons
+      let calculatedTotalPrice = parseFloat(field.price_per_hour) * hoursDiff;
+      const addOnValidations = [];
+
+      for (const addOn of add_ons) {
+        const [addOnData] = await connection.execute(`
+          SELECT * FROM add_ons WHERE id = ? AND place_id = ?
+        `, [addOn.id_add_on, field.id_place]);
+
+        if (addOnData.length === 0) {
+          await connection.end();
+          return res.status(404).json({
+            success: false,
+            message: `Add-on dengan ID ${addOn.id_add_on} tidak ditemukan atau tidak tersedia untuk lapangan ini`
+          });
+        }
+
+        const addOnItem = addOnData[0];
+        
+        if (addOnItem.stock < addOn.quantity) {
+          await connection.end();
+          return res.status(400).json({
+            success: false,
+            message: `Stok add-on ${addOnItem.add_on_name} tidak mencukupi. Tersedia: ${addOnItem.stock}, Diminta: ${addOn.quantity}`
+          });
+        }
+
+        calculatedTotalPrice += parseFloat(addOnItem.price_per_hour) * parseInt(addOn.quantity) * hoursDiff;
+        addOnValidations.push({
+          ...addOn,
+          addOnData: addOnItem
+        });
+      }
+
+      // Generate order_id for payment
+      const orderId = `BOOKING-${Date.now()}-${id_users}`;
+
+      // Create booking
+      const [bookingResult] = await connection.execute(`
+        INSERT INTO bookings (
+          id_users, 
+          field_id, 
+          booking_datetime_start, 
+          booking_datetime_end, 
+          total_price, 
+          status, 
+          order_id,
+          snap_token,
+          note,
+          created_at, 
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'waiting_confirmation', ?, ?, ?, NOW(), NOW())
+      `, [
+        id_users, 
+        field_id, 
+        booking_datetime_start, 
+        booking_datetime_end, 
+        calculatedTotalPrice, 
+        orderId,
+        snap_token,
+        note
+      ]);
+
+      const bookingId = bookingResult.insertId;
+
+      // Create detail bookings and decrease stock
+      for (const validation of addOnValidations) {
+        // Insert detail booking
+        await connection.execute(`
+          INSERT INTO detail_booking (
+            id_booking, 
+            id_add_on, 
+            quantity, 
+            total_price,
+            created_at, 
+            updated_at
+          ) VALUES (?, ?, ?, ?, NOW(), NOW())
+        `, [
+          bookingId,
+          validation.id_add_on,
+          validation.quantity,
+          parseFloat(validation.addOnData.price_per_hour) * parseInt(validation.quantity) * hoursDiff
+        ]);
+
+        // Decrease add-on stock
+        await connection.execute(`
+          UPDATE add_ons SET stock = stock - ?, updated_at = NOW() WHERE id = ?
+        `, [validation.quantity, validation.id_add_on]);
+      }
+
+      await connection.end();
 
       res.status(201).json({
         success: true,
         message: 'Booking berhasil dibuat',
-        data: newBooking
+        data: {
+          booking_id: bookingId,
+          order_id: orderId,
+          total_price: calculatedTotalPrice,
+          status: 'waiting_confirmation',
+          message: 'Booking menunggu konfirmasi dari pemilik lapangan'
+        }
       });
+
     } catch (error) {
       console.error('Error creating booking:', error);
       res.status(500).json({
@@ -97,323 +356,357 @@ class BookingController {
     }
   }
 
-  // PUT /api/booking/:id - Update booking
-  static async updateBooking(req, res) {
-    try {
-      const { id } = req.params;
-      
-      // Cek apakah booking ada
-      const existingBooking = await BookingModel.getById(id);
-      if (!existingBooking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking tidak ditemukan'
-        });
-      }
-
-      // Jika ada perubahan waktu, cek ketersediaan
-      const { field_id, booking_datetime_start, booking_datetime_end } = req.body;
-      if (field_id && booking_datetime_start && booking_datetime_end) {
-        const isAvailable = await BookingModel.checkAvailability(
-          field_id, booking_datetime_start, booking_datetime_end
-        );
-
-        if (!isAvailable) {
-          return res.status(409).json({
-            success: false,
-            message: 'Field tidak tersedia pada waktu yang dipilih'
-          });
-        }
-      }
-
-      const updated = await BookingModel.update(id, req.body);
-      
-      if (!updated) {
-        return res.status(500).json({
-          success: false,
-          message: 'Gagal mengupdate booking'
-        });
-      }
-
-      const updatedBooking = await BookingModel.getById(id);
-
-      res.json({
-        success: true,
-        message: 'Booking berhasil diupdate',
-        data: updatedBooking
-      });
-    } catch (error) {
-      console.error('Error updating booking:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengupdate booking',
-        error: error.message
-      });
-    }
-  }
-
-  // PATCH /api/bookings/:id/status - Update status booking
+  // Update booking status - NO AUTH REQUIRED
   static async updateBookingStatus(req, res) {
     try {
       const { id } = req.params;
-      const { status } = req.body;
-      
-      // Validasi status
-      const validStatuses = ['waiting_confirmation', 'approved', 'cancelled', 'completed'];
-      if (!status || !validStatuses.includes(status)) {
+      const { status, note } = req.body;
+
+      // Validate status
+      if (!['approved', 'cancelled'].includes(status)) {
         return res.status(400).json({
           success: false,
-          message: 'Status harus salah satu dari: waiting_confirmation, approved, cancelled, completed'
+          message: 'Status harus approved atau cancelled'
         });
       }
 
-      // Cek apakah booking ada
-      const existingBooking = await BookingModel.getById(id);
-      if (!existingBooking) {
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Get booking info
+      const [bookings] = await connection.execute(`
+        SELECT * FROM bookings WHERE id = ?
+      `, [id]);
+
+      if (bookings.length === 0) {
+        await connection.end();
         return res.status(404).json({
           success: false,
           message: 'Booking tidak ditemukan'
         });
       }
 
-      const updated = await BookingModel.updateStatus(id, status);
-      
-      if (!updated) {
-        return res.status(500).json({
+      const booking = bookings[0];
+
+      // Check if booking can be updated
+      if (booking.status !== 'waiting_confirmation') {
+        await connection.end();
+        return res.status(400).json({
           success: false,
-          message: 'Gagal mengupdate status booking'
+          message: `Booking dengan status ${booking.status} tidak dapat diubah`
         });
       }
 
-      const updatedBooking = await BookingModel.getById(id);
+      // If cancelling, restore add-on stock
+      if (status === 'cancelled') {
+        await BookingController.restoreAddOnStock(connection, id);
+      }
+
+      // Update booking status
+      await connection.execute(`
+        UPDATE bookings 
+        SET status = ?, note = ?, updated_at = NOW() 
+        WHERE id = ?
+      `, [status, note || null, id]);
+
+      await connection.end();
+
+      const statusMessage = status === 'approved' 
+        ? 'Booking berhasil disetujui' 
+        : 'Booking berhasil dibatalkan dan stok add-on dikembalikan';
 
       res.json({
         success: true,
-        message: 'Status booking berhasil diupdate',
-        data: updatedBooking
+        message: statusMessage,
+        data: {
+          booking_id: id,
+          status: status,
+          note: note || null
+        }
       });
+
     } catch (error) {
       console.error('Error updating booking status:', error);
       res.status(500).json({
         success: false,
-        message: 'Gagal mengupdate status booking',
+        message: 'Gagal mengubah status booking',
         error: error.message
       });
     }
   }
 
-  // DELETE /api/bookings/:id - Hapus booking
-  static async deleteBooking(req, res) {
+  // Get bookings by user ID - NO AUTH REQUIRED
+  static async getMyBookings(req, res) {
+    try {
+      const { user_id } = req.query; // Get from query parameter
+      
+      if (!user_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'user_id parameter diperlukan'
+        });
+      }
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Auto update expired bookings to completed
+      await BookingController.autoUpdateExpiredBookings(connection);
+
+      const [bookings] = await connection.execute(`
+        SELECT 
+          b.*,
+          f.field_name,
+          f.field_type,
+          p.place_name,
+          p.address as place_address
+        FROM bookings b
+        LEFT JOIN fields f ON b.field_id = f.id
+        LEFT JOIN places p ON f.id_place = p.id
+        WHERE b.id_users = ?
+        ORDER BY b.created_at DESC
+      `, [user_id]);
+
+      // Get detail bookings for each booking
+      for (let i = 0; i < bookings.length; i++) {
+        const [details] = await connection.execute(`
+          SELECT 
+            db.*,
+            a.add_on_name,
+            a.add_on_description,
+            a.price_per_hour
+          FROM detail_booking db
+          LEFT JOIN add_ons a ON db.id_add_on = a.id
+          WHERE db.id_booking = ?
+        `, [bookings[i].id]);
+        
+        bookings[i].detail_bookings = details;
+      }
+
+      await connection.end();
+
+      res.json({
+        success: true,
+        message: 'Data booking user berhasil diambil',
+        data: bookings
+      });
+
+    } catch (error) {
+      console.error('Error getting user bookings:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Gagal mengambil data booking user',
+        error: error.message
+      });
+    }
+  }
+
+  // Get bookings by field owner ID - NO AUTH REQUIRED
+  static async getFieldOwnerBookings(req, res) {
+    try {
+      const { owner_id } = req.query; // Get from query parameter
+      
+      if (!owner_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'owner_id parameter diperlukan'
+        });
+      }
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Auto update expired bookings to completed
+      await BookingController.autoUpdateExpiredBookings(connection);
+
+      const [bookings] = await connection.execute(`
+        SELECT 
+          b.*,
+          u.name as user_name,
+          u.email as user_email,
+          f.field_name,
+          f.field_type,
+          p.place_name,
+          p.address as place_address
+        FROM bookings b
+        LEFT JOIN users u ON b.id_users = u.id
+        LEFT JOIN fields f ON b.field_id = f.id
+        LEFT JOIN places p ON f.id_place = p.id
+        WHERE p.id_users = ?
+        ORDER BY b.created_at DESC
+      `, [owner_id]);
+
+      // Get detail bookings for each booking
+      for (let i = 0; i < bookings.length; i++) {
+        const [details] = await connection.execute(`
+          SELECT 
+            db.*,
+            a.add_on_name,
+            a.add_on_description,
+            a.price_per_hour
+          FROM detail_booking db
+          LEFT JOIN add_ons a ON db.id_add_on = a.id
+          WHERE db.id_booking = ?
+        `, [bookings[i].id]);
+        
+        bookings[i].detail_bookings = details;
+      }
+
+      await connection.end();
+
+      res.json({
+        success: true,
+        message: 'Data booking field owner berhasil diambil',
+        data: bookings
+      });
+
+    } catch (error) {
+      console.error('Error getting field owner bookings:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Gagal mengambil data booking field owner',
+        error: error.message
+      });
+    }
+  }
+
+  // Complete booking - NO AUTH REQUIRED
+  static async completeBooking(req, res) {
     try {
       const { id } = req.params;
-      
-      // Cek apakah booking ada
-      const existingBooking = await BookingModel.getById(id);
-      if (!existingBooking) {
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Get booking info
+      const [bookings] = await connection.execute(`
+        SELECT * FROM bookings WHERE id = ?
+      `, [id]);
+
+      if (bookings.length === 0) {
+        await connection.end();
         return res.status(404).json({
           success: false,
           message: 'Booking tidak ditemukan'
         });
       }
 
-      const deleted = await BookingModel.delete(id);
-      
-      if (!deleted) {
-        return res.status(500).json({
-          success: false,
-          message: 'Gagal menghapus booking'
-        });
-      }
+      const booking = bookings[0];
 
-      res.json({
-        success: true,
-        message: 'Booking berhasil dihapus'
-      });
-    } catch (error) {
-      console.error('Error deleting booking:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal menghapus booking',
-        error: error.message
-      });
-    }
-  }
-
-  // POST /api/bookings/check-availability - Cek ketersediaan field
-  static async checkAvailability(req, res) {
-    try {
-      const { field_id, booking_datetime_start, booking_datetime_end } = req.body;
-      
-      if (!field_id || !booking_datetime_start || !booking_datetime_end) {
+      // Check if booking can be completed
+      if (booking.status !== 'approved') {
+        await connection.end();
         return res.status(400).json({
           success: false,
-          message: 'field_id, booking_datetime_start, dan booking_datetime_end wajib diisi'
+          message: 'Booking harus dalam status approved untuk bisa diselesaikan'
         });
       }
 
-      const isAvailable = await BookingModel.checkAvailability(
-        field_id, booking_datetime_start, booking_datetime_end
-      );
+      // Update booking status to completed
+      await connection.execute(`
+        UPDATE bookings 
+        SET status = 'completed', updated_at = NOW() 
+        WHERE id = ?
+      `, [id]);
+
+      // Restore add-on stock when completed
+      await BookingController.restoreAddOnStock(connection, id);
+
+      await connection.end();
 
       res.json({
         success: true,
-        message: 'Cek ketersediaan berhasil',
+        message: 'Booking berhasil diselesaikan',
         data: {
-          field_id,
-          booking_datetime_start,
-          booking_datetime_end,
-          tersedia: isAvailable
+          booking_id: id,
+          status: 'completed'
         }
       });
+
     } catch (error) {
-      console.error('Error checking availability:', error);
+      console.error('Error completing booking:', error);
       res.status(500).json({
         success: false,
-        message: 'Gagal mengecek ketersediaan',
+        message: 'Gagal menyelesaikan booking',
         error: error.message
       });
     }
   }
 
-  // GET /api/bookings/user/:userId - Mendapatkan booking berdasarkan user ID
-  static async getBookingsByUserId(req, res) {
+  // Helper method to auto update expired bookings
+  static async autoUpdateExpiredBookings(connection) {
     try {
-      const { userId } = req.params;
-      const bookings = await BookingModel.getByUserId(userId);
+      const now = new Date();
       
-      res.json({
-        success: true,
-        message: 'Data bookings berhasil diambil',
-        data: bookings,
-        total: bookings.length
-      });
-    } catch (error) {
-      console.error('Error getting bookings by user ID:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengambil data bookings',
-        error: error.message
-      });
-    }
-  }
+      // Find approved bookings that have passed their end time
+      const [expiredBookings] = await connection.execute(`
+        SELECT id, booking_datetime_end 
+        FROM bookings 
+        WHERE status = 'approved' 
+        AND booking_datetime_end < ?
+      `, [now]);
 
-  // GET /api/bookings/field/:fieldId - Mendapatkan booking berdasarkan field ID
-  static async getBookingsByFieldId(req, res) {
-    try {
-      const { fieldId } = req.params;
-      const bookings = await BookingModel.getByFieldId(fieldId);
-      
-      res.json({
-        success: true,
-        message: 'Data bookings berhasil diambil',
-        data: bookings,
-        total: bookings.length
-      });
-    } catch (error) {
-      console.error('Error getting bookings by field ID:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengambil data bookings',
-        error: error.message
-      });
-    }
-  }
-
-  // GET /api/bookings/status/:status - Mendapatkan booking berdasarkan status
-  static async getBookingsByStatus(req, res) {
-    try {
-      const { status } = req.params;
-      const bookings = await BookingModel.getByStatus(status);
-      
-      res.json({
-        success: true,
-        message: `Data bookings dengan status ${status} berhasil diambil`,
-        data: bookings,
-        total: bookings.length
-      });
-    } catch (error) {
-      console.error('Error getting bookings by status:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengambil data bookings',
-        error: error.message
-      });
-    }
-  }
-
-  // GET /api/bookings/order/:orderId - Mendapatkan booking berdasarkan order ID
-  static async getBookingByOrderId(req, res) {
-    try {
-      const { orderId } = req.params;
-      const booking = await BookingModel.getByOrderId(orderId);
-      
-      if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking tidak ditemukan'
-        });
+      // Update expired bookings to completed
+      for (const booking of expiredBookings) {
+        await connection.execute(`
+          UPDATE bookings 
+          SET status = 'completed', updated_at = NOW() 
+          WHERE id = ?
+        `, [booking.id]);
+        
+        // Restore add-on stock when auto-completed
+        await BookingController.restoreAddOnStock(connection, booking.id);
+        
+        console.log(`Auto updated booking ${booking.id} to completed (expired on ${booking.booking_datetime_end})`);
       }
-
-      res.json({
-        success: true,
-        message: 'Data booking berhasil diambil',
-        data: booking
-      });
+      
+      return expiredBookings.length;
     } catch (error) {
-      console.error('Error getting booking by order ID:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengambil data booking',
-        error: error.message
-      });
+      console.error('Error in auto update expired bookings:', error);
+      return 0;
     }
   }
 
-  // PATCH /api/bookings/:id/snap-token - Update snap token
-  static async updateSnapToken(req, res) {
+  // Helper method to restore add-on stock when booking is completed or cancelled
+  static async restoreAddOnStock(connection, bookingId) {
     try {
-      const { id } = req.params;
-      const { snap_token } = req.body;
+      // Get detail bookings for stock restoration
+      const [detailBookings] = await connection.execute(`
+        SELECT * FROM detail_booking WHERE id_booking = ?
+      `, [bookingId]);
+
+      // Restore stock for each add-on
+      for (const detail of detailBookings) {
+        await connection.execute(`
+          UPDATE add_ons SET stock = stock + ?, updated_at = NOW() WHERE id = ?
+        `, [detail.quantity, detail.id_add_on]);
+      }
       
-      if (!snap_token) {
-        return res.status(400).json({
-          success: false,
-          message: 'snap_token wajib diisi'
-        });
-      }
-
-      // Cek apakah booking ada
-      const existingBooking = await BookingModel.getById(id);
-      if (!existingBooking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking tidak ditemukan'
-        });
-      }
-
-      const updated = await BookingModel.updateSnapToken(id, snap_token);
-      
-      if (!updated) {
-        return res.status(500).json({
-          success: false,
-          message: 'Gagal mengupdate snap token'
-        });
-      }
-
-      const updatedBooking = await BookingModel.getById(id);
-
-      res.json({
-        success: true,
-        message: 'Snap token berhasil diupdate',
-        data: updatedBooking
-      });
+      console.log(`Restored stock for ${detailBookings.length} add-ons from booking ${bookingId}`);
+      return detailBookings.length;
     } catch (error) {
-      console.error('Error updating snap token:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengupdate snap token',
-        error: error.message
-      });
+      console.error('Error restoring add-on stock:', error);
+      return 0;
     }
   }
 }

@@ -1,20 +1,36 @@
-const PlaceModel = require('../models/PlaceModel');
-const UserModel = require('../models/UserModel');
+const mysql = require('mysql2/promise');
+const { deleteFile, getFullPath } = require('../middleware/uploadPlacePhoto');
+const path = require('path');
 
 class PlaceController {
-  // GET /api/places - Mendapatkan semua places
+  // Get all places
   static async getAllPlaces(req, res) {
     try {
-      const places = await PlaceModel.getAll();
-      
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [places] = await connection.execute(`
+        SELECT p.*, u.name as owner_name, u.email as owner_email 
+        FROM places p 
+        LEFT JOIN users u ON p.id_users = u.id 
+        ORDER BY p.created_at DESC
+      `);
+
+      await connection.end();
+
       res.json({
         success: true,
         message: 'Data places berhasil diambil',
-        data: places,
-        total: places.length
+        data: places
       });
+
     } catch (error) {
-      console.error('Error getting all places:', error);
+      console.error('Error getting places:', error);
       res.status(500).json({
         success: false,
         message: 'Gagal mengambil data places',
@@ -23,13 +39,29 @@ class PlaceController {
     }
   }
 
-  // GET /api/places/:id - Mendapatkan place berdasarkan ID
+  // Get place by ID
   static async getPlaceById(req, res) {
     try {
       const { id } = req.params;
-      const place = await PlaceModel.getById(id);
       
-      if (!place) {
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [places] = await connection.execute(`
+        SELECT p.*, u.name as owner_name, u.email as owner_email 
+        FROM places p 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE p.id = ?
+      `, [id]);
+
+      await connection.end();
+
+      if (places.length === 0) {
         return res.status(404).json({
           success: false,
           message: 'Place tidak ditemukan'
@@ -39,8 +71,9 @@ class PlaceController {
       res.json({
         success: true,
         message: 'Data place berhasil diambil',
-        data: place
+        data: places[0]
       });
+
     } catch (error) {
       console.error('Error getting place by ID:', error);
       res.status(500).json({
@@ -51,90 +84,79 @@ class PlaceController {
     }
   }
 
-  // POST /api/places - Membuat place baru (hanya field_owner)
+  // Create new place
   static async createPlace(req, res) {
     try {
-      const { place_name, address, balance, id_users, place_photo_data } = req.body;
+      const { place_name, address, balance, id_users } = req.body;
       
-      // Validasi field wajib
+      // Validasi required fields
       if (!place_name || !address || !id_users) {
         return res.status(400).json({
           success: false,
-          message: 'Data tidak lengkap. place_name, address, dan id_users wajib diisi'
+          message: 'place_name, address, dan id_users wajib diisi'
         });
       }
 
-      // Validasi file foto harus diupload
-      if (!place_photo_data && !req.file) {
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Cek apakah user exists
+      const [users] = await connection.execute(
+        'SELECT id FROM users WHERE id = ?',
+        [id_users]
+      );
+
+      if (users.length === 0) {
+        await connection.end();
         return res.status(400).json({
-          success: false,
-          message: 'File foto place wajib diupload'
-        });
-      }
-
-      // Cek apakah user ada dan memiliki role field_owner
-      const user = await UserModel.getById(id_users);
-      if (!user) {
-        return res.status(404).json({
           success: false,
           message: 'User tidak ditemukan'
         });
       }
 
-      if (user.role !== 'field_owner') {
-        return res.status(403).json({
-          success: false,
-          message: 'Hanya user dengan role field_owner yang dapat membuat place'
-        });
-      }
-
-      // Validasi balance harus berupa angka
-      const placeBalance = balance ? parseInt(balance) : 0;
-      if (isNaN(placeBalance)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Balance harus berupa angka'
-        });
-      }
-
-      // Gunakan base64 data yang sudah diprocess oleh middleware
-      const photoData = place_photo_data || (req.file ? `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}` : null);
-
-      const placeData = {
+      // Insert place baru
+      const photoPath = req.file ? `/uploads/places/${req.file.filename}` : null;
+      
+      const [result] = await connection.execute(`
+        INSERT INTO places (place_name, address, balance, place_photo, id_users, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+      `, [
         place_name,
         address,
-        balance: placeBalance,
-        place_photo: photoData, // Simpan base64 data ke database
-        id_users: parseInt(id_users)
-      };
+        balance || 0,
+        photoPath,
+        id_users
+      ]);
 
-      const placeId = await PlaceModel.create(placeData);
-      const newPlace = await PlaceModel.getById(placeId);
+      // Get data place yang baru dibuat
+      const [newPlace] = await connection.execute(`
+        SELECT p.*, u.name as owner_name, u.email as owner_email 
+        FROM places p 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE p.id = ?
+      `, [result.insertId]);
 
-      // Optional: Cleanup temporary file jika ada
-      if (req.body.place_photo_path) {
-        try {
-          const fs = require('fs');
-          if (fs.existsSync(req.body.place_photo_path)) {
-            fs.unlinkSync(req.body.place_photo_path);
-            console.log(`🧹 Cleaned up temp file: ${req.body.place_photo_filename}`);
-          }
-        } catch (cleanupError) {
-          console.warn('Warning: Could not cleanup temp file:', cleanupError.message);
-        }
-      }
+      await connection.end();
 
       res.status(201).json({
         success: true,
         message: 'Place berhasil dibuat',
-        data: {
-          ...newPlace,
-          photo_url: `/uploads/places/place-${placeId}-${Date.now()}.jpg`, // Virtual URL untuk frontend
-          photo_preview: photoData.substring(0, 100) + '...' // Preview base64 (first 100 chars)
-        }
+        data: newPlace[0]
       });
+
     } catch (error) {
       console.error('Error creating place:', error);
+      
+      // Delete uploaded file jika ada error
+      if (req.file) {
+        deleteFile(req.file.path);
+      }
+      
       res.status(500).json({
         success: false,
         message: 'Gagal membuat place',
@@ -143,48 +165,99 @@ class PlaceController {
     }
   }
 
-  // PUT /api/places/:id - Update place
+  // Update place
   static async updatePlace(req, res) {
     try {
       const { id } = req.params;
-      
-      // Cek apakah place ada
-      const existingPlace = await PlaceModel.getById(id);
-      if (!existingPlace) {
+      const { place_name, address, balance, id_users } = req.body;
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Cek apakah place exists
+      const [existingPlace] = await connection.execute(
+        'SELECT * FROM places WHERE id = ?',
+        [id]
+      );
+
+      if (existingPlace.length === 0) {
+        await connection.end();
         return res.status(404).json({
           success: false,
           message: 'Place tidak ditemukan'
         });
       }
 
-      // Jika ada file foto baru yang diupload, convert ke base64
-      if (req.body.place_photo_data || req.file) {
-        req.body.place_photo = req.body.place_photo_data || (req.file ? `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}` : null);
-        
-        // Hapus field place_photo_data karena tidak ada di database
-        delete req.body.place_photo_data;
-        delete req.body.place_photo_filename;
-        delete req.body.place_photo_mimetype;
+      // Jika ada file baru yang diupload, hapus file lama
+      if (req.file && existingPlace[0].place_photo) {
+        const oldFilePath = getFullPath(existingPlace[0].place_photo);
+        if (oldFilePath) {
+          deleteFile(oldFilePath);
+        }
       }
 
-      const updated = await PlaceModel.update(id, req.body);
-      
-      if (!updated) {
-        return res.status(500).json({
-          success: false,
-          message: 'Gagal mengupdate place'
-        });
+      // Update place
+      const updateFields = [];
+      const updateValues = [];
+
+      if (place_name) {
+        updateFields.push('place_name = ?');
+        updateValues.push(place_name);
+      }
+      if (address) {
+        updateFields.push('address = ?');
+        updateValues.push(address);
+      }
+      if (balance !== undefined) {
+        updateFields.push('balance = ?');
+        updateValues.push(balance);
+      }
+      if (id_users) {
+        updateFields.push('id_users = ?');
+        updateValues.push(id_users);
+      }
+      if (req.file) {
+        updateFields.push('place_photo = ?');
+        updateValues.push(`/uploads/places/${req.file.filename}`);
       }
 
-      const updatedPlace = await PlaceModel.getById(id);
+      updateFields.push('updated_at = NOW()');
+      updateValues.push(id);
+
+      if (updateFields.length > 1) { // > 1 karena updated_at selalu ada
+        const updateQuery = `UPDATE places SET ${updateFields.join(', ')} WHERE id = ?`;
+        await connection.execute(updateQuery, updateValues);
+      }
+
+      // Get updated place data
+      const [updatedPlace] = await connection.execute(`
+        SELECT p.*, u.name as owner_name, u.email as owner_email 
+        FROM places p 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE p.id = ?
+      `, [id]);
+
+      await connection.end();
 
       res.json({
         success: true,
         message: 'Place berhasil diupdate',
-        data: updatedPlace
+        data: updatedPlace[0]
       });
+
     } catch (error) {
       console.error('Error updating place:', error);
+      
+      // Delete uploaded file jika ada error
+      if (req.file) {
+        deleteFile(req.file.path);
+      }
+      
       res.status(500).json({
         success: false,
         message: 'Gagal mengupdate place',
@@ -193,33 +266,51 @@ class PlaceController {
     }
   }
 
-  // DELETE /api/places/:id - Hapus place
+  // Delete place
   static async deletePlace(req, res) {
     try {
       const { id } = req.params;
-      
-      // Cek apakah place ada
-      const existingPlace = await PlaceModel.getById(id);
-      if (!existingPlace) {
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      // Get place data untuk hapus file foto
+      const [place] = await connection.execute(
+        'SELECT * FROM places WHERE id = ?',
+        [id]
+      );
+
+      if (place.length === 0) {
+        await connection.end();
         return res.status(404).json({
           success: false,
           message: 'Place tidak ditemukan'
         });
       }
 
-      const deleted = await PlaceModel.delete(id);
-      
-      if (!deleted) {
-        return res.status(500).json({
-          success: false,
-          message: 'Gagal menghapus place'
-        });
+      // Delete place
+      await connection.execute('DELETE FROM places WHERE id = ?', [id]);
+
+      await connection.end();
+
+      // Hapus file foto jika ada
+      if (place[0].place_photo) {
+        const filePath = getFullPath(place[0].place_photo);
+        if (filePath) {
+          deleteFile(filePath);
+        }
       }
 
       res.json({
         success: true,
         message: 'Place berhasil dihapus'
       });
+
     } catch (error) {
       console.error('Error deleting place:', error);
       res.status(500).json({
@@ -230,20 +321,37 @@ class PlaceController {
     }
   }
 
-  // GET /api/places/owner/:ownerId - Mendapatkan places berdasarkan owner ID
-  static async getPlacesByOwnerId(req, res) {
+  // Get places by owner (user_id)
+  static async getPlacesByOwner(req, res) {
     try {
-      const { ownerId } = req.params;
-      const places = await PlaceModel.getByOwnerId(ownerId);
-      
+      const { id_users } = req.params;
+
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [places] = await connection.execute(`
+        SELECT p.*, u.name as owner_name, u.email as owner_email 
+        FROM places p 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE p.id_users = ? 
+        ORDER BY p.created_at DESC
+      `, [id_users]);
+
+      await connection.end();
+
       res.json({
         success: true,
         message: 'Data places berhasil diambil',
-        data: places,
-        total: places.length
+        data: places
       });
+
     } catch (error) {
-      console.error('Error getting places by owner ID:', error);
+      console.error('Error getting places by owner:', error);
       res.status(500).json({
         success: false,
         message: 'Gagal mengambil data places',
@@ -252,114 +360,48 @@ class PlaceController {
     }
   }
 
-  // PATCH /api/places/:id/balance - Update balance place
-  static async updateBalance(req, res) {
-    try {
-      const { id } = req.params;
-      const { balance } = req.body;
-      
-      if (balance === undefined || balance < 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'Balance harus diisi dan tidak boleh negatif'
-        });
-      }
-
-      // Cek apakah place ada
-      const existingPlace = await PlaceModel.getById(id);
-      if (!existingPlace) {
-        return res.status(404).json({
-          success: false,
-          message: 'Place tidak ditemukan'
-        });
-      }
-
-      const updated = await PlaceModel.updateBalance(id, balance);
-      
-      if (!updated) {
-        return res.status(500).json({
-          success: false,
-          message: 'Gagal mengupdate balance'
-        });
-      }
-
-      const updatedPlace = await PlaceModel.getById(id);
-
-      res.json({
-        success: true,
-        message: 'Balance berhasil diupdate',
-        data: updatedPlace
-      });
-    } catch (error) {
-      console.error('Error updating balance:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengupdate balance',
-        error: error.message
-      });
-    }
-  }
-
-  // GET /api/places/search?query=keyword - Search places
+  // Search places
   static async searchPlaces(req, res) {
     try {
-      const { query } = req.query;
+      const { q } = req.query; // query parameter
       
-      if (!query || query.trim() === '') {
+      if (!q) {
         return res.status(400).json({
           success: false,
-          message: 'Query parameter diperlukan untuk pencarian'
+          message: 'Parameter pencarian (q) diperlukan'
         });
       }
 
-      const places = await PlaceModel.search(query);
+      const connection = await mysql.createConnection({
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME
+      });
+
+      const [places] = await connection.execute(`
+        SELECT p.*, u.name as owner_name, u.email as owner_email 
+        FROM places p 
+        LEFT JOIN users u ON p.id_users = u.id 
+        WHERE p.place_name LIKE ? OR p.address LIKE ?
+        ORDER BY p.created_at DESC
+      `, [`%${q}%`, `%${q}%`]);
+
+      await connection.end();
 
       res.json({
         success: true,
-        message: 'Pencarian places berhasil',
+        message: 'Pencarian berhasil',
         data: places,
-        total: places.length,
-        query: query
+        query: q
       });
+
     } catch (error) {
       console.error('Error searching places:', error);
       res.status(500).json({
         success: false,
-        message: 'Gagal mencari places',
-        error: error.message
-      });
-    }
-  }
-
-  // GET /api/places/user/:userId/ownership - Cek ownership places
-  static async checkOwnership(req, res) {
-    try {
-      const { userId } = req.params;
-      const { placeId } = req.query;
-      
-      if (!placeId) {
-        return res.status(400).json({
-          success: false,
-          message: 'placeId query parameter diperlukan'
-        });
-      }
-
-      const isOwned = await PlaceModel.isOwnedByUser(placeId, userId);
-
-      res.json({
-        success: true,
-        message: 'Pengecekan ownership berhasil',
-        data: {
-          placeId: parseInt(placeId),
-          userId: parseInt(userId),
-          isOwned: isOwned
-        }
-      });
-    } catch (error) {
-      console.error('Error checking ownership:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Gagal mengecek ownership',
+        message: 'Gagal melakukan pencarian',
         error: error.message
       });
     }
