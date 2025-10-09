@@ -5,12 +5,21 @@ const { testConnection } = require('./config/database');
 const BookingScheduler = require('./services/BookingScheduler');
 require('dotenv').config();
 
+// Set timezone to Asia/Jakarta untuk konsistensi
+process.env.TZ = process.env.TZ || 'Asia/Jakarta';
+
 // Import routes
 const userRoutes = require('./routes/userRoutes');
 const placeRoutes = require('./routes/placeRoutes');
 const fieldRoutes = require('./routes/fields');
 const bookingRoutes = require('./routes/bookingRoutes');
 const addOnRoutes = require('./routes/addOnRoutes');
+const refundRoutes = require('./routes/refundRoutes');
+const postRoutes = require('./routes/postRoutes');
+const joinedRoutes = require('./routes/joinedRoutes');
+const ratingRoutes = require('./routes/ratingRoutes');
+const withdrawRoutes = require('./routes/withdrawRoutes');
+const promosiRoutes = require('./routes/promosiRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -41,7 +50,13 @@ app.get('/', (req, res) => {
       places: '/api/places',
       fields: '/api/fields',
       bookings: '/api/bookings',
-      addOns: '/api/add-ons'
+      addOns: '/api/add-ons',
+      refunds: '/api/refunds',
+      posts: '/api/posts',
+      joined: '/api/joined',
+      ratings: '/api/ratings',
+      withdraws: '/api/withdraws',
+      promosi: '/api/promosi'
     },
     documentation: {
       users: {
@@ -91,6 +106,60 @@ app.get('/', (req, res) => {
         'PUT /api/add-ons/:id': 'Update add-on (multipart/form-data, owner validation)',
         'PATCH /api/add-ons/:id/stock': 'Update stock add-on (owner validation)',
         'DELETE /api/add-ons/:id': 'Hapus add-on (owner validation, hapus foto otomatis)'
+      },
+      refunds: {
+        'GET /api/refunds': 'Mendapatkan semua refunds dengan detail booking',
+        'GET /api/refunds/:id': 'Mendapatkan refund berdasarkan ID',
+        'GET /api/refunds/booking/:booking_id': 'Mendapatkan refunds berdasarkan booking ID',
+        'POST /api/refunds': 'Membuat refund baru (multipart/form-data, foto bukti wajib, booking harus cancelled)',
+        'PUT /api/refunds/:id': 'Update refund (multipart/form-data, foto bukti opsional)',
+        'DELETE /api/refunds/:id': 'Hapus refund (hapus foto otomatis)'
+      },
+      posts: {
+        'GET /api/posts': 'Mendapatkan semua posts dengan detail booking dan join info',
+        'GET /api/posts/:id': 'Mendapatkan post berdasarkan ID dengan joined users',
+        'GET /api/posts/user?user_id=': 'Mendapatkan posts berdasarkan user ID',
+        'POST /api/posts': 'Membuat post baru (multipart/form-data, foto wajib, booking harus approved)',
+        'PUT /api/posts/:id': 'Update post (multipart/form-data, foto opsional)',
+        'DELETE /api/posts/:id': 'Hapus post (hapus foto otomatis)'
+      },
+      joined: {
+        'GET /api/joined': 'Mendapatkan semua join requests dengan detail',
+        'GET /api/joined/booking/:booking_id': 'Mendapatkan join requests berdasarkan booking ID',
+        'GET /api/joined/user?user_id=': 'Mendapatkan join requests berdasarkan user ID',
+        'GET /api/joined/poster?poster_user_id=': 'Mendapatkan pending joins untuk poster (approval)',
+        'POST /api/joined': 'Membuat join request (validasi max_person, booking approved)',
+        'PUT /api/joined/:id/status': 'Approve/reject join request (approved/rejected)',
+        'DELETE /api/joined/:id': 'Hapus join request'
+      },
+      ratings: {
+        'GET /api/ratings': 'Mendapatkan semua ratings dengan detail booking',
+        'GET /api/ratings/:id': 'Mendapatkan rating berdasarkan ID',
+        'GET /api/ratings/booking/:booking_id': 'Mendapatkan rating berdasarkan booking ID',
+        'GET /api/ratings/user?user_id=': 'Mendapatkan ratings berdasarkan user ID',
+        'GET /api/ratings/owner?owner_id=': 'Mendapatkan ratings berdasarkan field owner ID',
+        'GET /api/ratings/stats/:place_id': 'Mendapatkan statistik rating berdasarkan place ID',
+        'POST /api/ratings': 'Membuat rating baru (booking harus completed, 1 rating per booking)',
+        'PUT /api/ratings/:id': 'Update rating (rating_value 1-5, review)',
+        'DELETE /api/ratings/:id': 'Hapus rating'
+      },
+      withdraws: {
+        'GET /api/withdraws': 'Mendapatkan semua withdraws dengan detail user',
+        'GET /api/withdraws/:id': 'Mendapatkan withdraw berdasarkan ID',
+        'GET /api/withdraws/user?user_id=': 'Mendapatkan withdraws berdasarkan user ID',
+        'GET /api/withdraws/balance?user_id=': 'Mendapatkan balance summary user dari semua places',
+        'POST /api/withdraws': 'Membuat withdraw baru (multipart/form-data, foto wajib, validasi balance)',
+        'PUT /api/withdraws/:id': 'Update foto withdraw (multipart/form-data)',
+        'DELETE /api/withdraws/:id': 'Hapus withdraw (tidak mengembalikan balance)'
+      },
+      promosi: {
+        'GET /api/promosi': 'Mendapatkan semua promosi dengan full URL',
+        'GET /api/promosi/slider': 'Mendapatkan promosi untuk Android image slider (optimized)',
+        'GET /api/promosi/count': 'Mendapatkan jumlah total promosi',
+        'GET /api/promosi/:id': 'Mendapatkan promosi berdasarkan ID',
+        'POST /api/promosi': 'Membuat promosi baru (multipart/form-data, foto wajib)',
+        'PUT /api/promosi/:id': 'Update promosi (replace foto, multipart/form-data)',
+        'DELETE /api/promosi/:id': 'Hapus promosi (hapus foto otomatis)'
       }
     }
   });
@@ -102,6 +171,12 @@ app.use('/api/places', placeRoutes);
 app.use('/api/fields', fieldRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/add-ons', addOnRoutes);
+app.use('/api/refunds', refundRoutes);
+app.use('/api/posts', postRoutes);
+app.use('/api/joined', joinedRoutes);
+app.use('/api/ratings', ratingRoutes);
+app.use('/api/withdraws', withdrawRoutes);
+app.use('/api/promosi', promosiRoutes);
 
 // Health check endpoint
 app.get('/health', async (req, res) => {

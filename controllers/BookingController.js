@@ -176,12 +176,19 @@ class BookingController {
         });
       }
       
-      // Check minimum 1 day before booking
-      const oneDayFromNow = new Date(now.getTime() + (24 * 60 * 60 * 1000));
-      if (startDate < oneDayFromNow) {
+      // Check minimum next day (bukan 24 jam, tapi tanggal selanjutnya)
+      const today = new Date();
+      today.setHours(0, 0, 0, 0); // Set ke awal hari ini
+      const tomorrow = new Date(today);
+      tomorrow.setDate(today.getDate() + 1); // Tanggal besok
+      
+      const bookingDate = new Date(startDate);
+      bookingDate.setHours(0, 0, 0, 0); // Set ke awal hari booking
+      
+      if (bookingDate < tomorrow) {
         return res.status(400).json({
           success: false,
-          message: 'Booking harus dilakukan minimal 1 hari sebelum waktu mulai'
+          message: 'Booking harus dilakukan minimal untuk tanggal besok'
         });
       }
       
@@ -622,12 +629,24 @@ class BookingController {
         });
       }
 
+      // Get place info for balance update
+      const [placeInfo] = await connection.execute(`
+        SELECT f.id_place FROM fields f 
+        LEFT JOIN bookings b ON b.field_id = f.id 
+        WHERE b.id = ?
+      `, [id]);
+
       // Update booking status to completed
       await connection.execute(`
         UPDATE bookings 
         SET status = 'completed', updated_at = NOW() 
         WHERE id = ?
       `, [id]);
+
+      // Add balance to place owner (deposit)
+      if (placeInfo.length > 0) {
+        await BookingController.addBalanceToPlace(connection, placeInfo[0].id_place, booking.total_price);
+      }
 
       // Restore add-on stock when completed
       await BookingController.restoreAddOnStock(connection, id);
@@ -658,12 +677,13 @@ class BookingController {
     try {
       const now = new Date();
       
-      // Find approved bookings that have passed their end time
+      // Find approved bookings that have passed their end time with place info
       const [expiredBookings] = await connection.execute(`
-        SELECT id, booking_datetime_end 
-        FROM bookings 
-        WHERE status = 'approved' 
-        AND booking_datetime_end < ?
+        SELECT b.id, b.booking_datetime_end, b.total_price, f.id_place 
+        FROM bookings b
+        LEFT JOIN fields f ON b.field_id = f.id
+        WHERE b.status = 'approved' 
+        AND b.booking_datetime_end < ?
       `, [now]);
 
       // Update expired bookings to completed
@@ -674,10 +694,14 @@ class BookingController {
           WHERE id = ?
         `, [booking.id]);
         
+        // Add balance to place owner (deposit)
+        await BookingController.addBalanceToPlace(connection, booking.id_place, booking.total_price);
+        
         // Restore add-on stock when auto-completed
         await BookingController.restoreAddOnStock(connection, booking.id);
         
         console.log(`Auto updated booking ${booking.id} to completed (expired on ${booking.booking_datetime_end})`);
+        console.log(`Added balance ${booking.total_price} to place ${booking.id_place}`);
       }
       
       return expiredBookings.length;
@@ -707,6 +731,24 @@ class BookingController {
     } catch (error) {
       console.error('Error restoring add-on stock:', error);
       return 0;
+    }
+  }
+
+  // Helper method to add balance to place when booking is completed
+  static async addBalanceToPlace(connection, placeId, amount) {
+    try {
+      // Update balance in places table
+      await connection.execute(`
+        UPDATE places 
+        SET balance = COALESCE(balance, 0) + ?, updated_at = NOW() 
+        WHERE id = ?
+      `, [amount, placeId]);
+      
+      console.log(`Added balance ${amount} to place ${placeId}`);
+      return true;
+    } catch (error) {
+      console.error('Error adding balance to place:', error);
+      return false;
     }
   }
 }

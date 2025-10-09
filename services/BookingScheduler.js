@@ -44,7 +44,7 @@ class BookingScheduler {
       
       // Find approved bookings that have passed their end time
       const [expiredBookings] = await connection.execute(`
-        SELECT b.id, b.booking_datetime_end, f.field_name, u.name as user_name
+        SELECT b.id, b.booking_datetime_end, b.total_price, f.field_name, f.id_place, u.name as user_name
         FROM bookings b
         LEFT JOIN fields f ON b.field_id = f.id
         LEFT JOIN users u ON b.id_users = u.id
@@ -84,14 +84,35 @@ class BookingScheduler {
         WHERE id = ?
       `, [booking.id]);
       
+      // Add balance to place owner (deposit)
+      await this.addBalanceToPlace(connection, booking.id_place, booking.total_price);
+      
       // Restore add-on stock
       const restoredCount = await this.restoreAddOnStock(connection, booking.id);
       
       console.log(` Booking #${booking.id} (${booking.user_name} - ${booking.field_name}) completed`);
+      console.log(` Added balance ${booking.total_price} to place ${booking.id_place}`);
       console.log(` Restored ${restoredCount} add-on items`);
       
     } catch (error) {
       console.error(` Error completing booking #${booking.id}:`, error.message);
+    }
+  }
+
+  // Add balance to place when booking is completed
+  static async addBalanceToPlace(connection, placeId, amount) {
+    try {
+      // Update balance in places table
+      await connection.execute(`
+        UPDATE places 
+        SET balance = COALESCE(balance, 0) + ?, updated_at = NOW() 
+        WHERE id = ?
+      `, [amount, placeId]);
+      
+      return true;
+    } catch (error) {
+      console.error(' Error adding balance to place:', error.message);
+      return false;
     }
   }
 
